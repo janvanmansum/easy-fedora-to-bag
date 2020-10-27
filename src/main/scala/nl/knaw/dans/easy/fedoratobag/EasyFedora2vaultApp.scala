@@ -195,9 +195,10 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
     for {
       foXml <- fedoraProvider.loadFoXml(fedoraFileId)
       path = Paths.get((foXml \\ "file-item-md" \\ "path").text)
-      _ = logger.info(s"Adding $fedoraFileId to $path")
-      fileItem <- FileItem(foXml)
+      sizeString = (foXml \\ "file-item-md" \\ "size").text
+      _ = logger.info(s"Adding $fedoraFileId (size=$sizeString) to $path")
       // TODO split method to find largest pdf/image
+      fileItem <- FileItem(foXml)
       _ <- fedoraProvider
         .disseminateDatastream(fedoraFileId, streamId)
         .map(bag.addPayloadFile(_, path))
