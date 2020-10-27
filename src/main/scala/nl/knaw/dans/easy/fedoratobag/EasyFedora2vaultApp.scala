@@ -175,6 +175,7 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
       foXml <- fedoraProvider.loadFoXml(fedoraFileId)
       path = Paths.get((foXml \\ "file-item-md" \\ "path").text)
       _ = logger.info(s"Adding $fedoraFileId to $path")
+      fileItem <- FileItem(foXml)
       _ <- fedoraProvider
         .disseminateDatastream(fedoraFileId, streamId)
         .map(bag.addPayloadFile(_, path))
@@ -184,7 +185,6 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
       maybeDigest = fileStream.flatMap(n => (n \\ "contentDigest").theSeq.headOption)
       _ <- maybeDigest.map(validateChecksum(bag.baseDir / s"data/$path", bag, fedoraFileId))
         .getOrElse(Success(logger.warn(s"No digest found for $fedoraFileId ${ fileStream.map(_.toOneLiner).getOrElse("") }")))
-      fileItem <- FileItem(foXml)
     } yield fileItem
   }.recoverWith { case e => Failure(new Exception(s"$fedoraFileId ${ e.getMessage }", e)) }
 

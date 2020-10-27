@@ -239,7 +239,6 @@ class AppSpec extends TestSupportFixture with BagIndexSupport with MockFactory w
       ),
     )
     expectedSubordinates(app.fedoraProvider, "easy-file:35")
-    expectedManagedStreams(app.fedoraProvider, mockContentOfFile35)
 
     app.createBag("easy-dataset:13", testDir / "bags" / UUID.randomUUID.toString, strict = true, app.filter) should matchPattern {
       case Failure(e) if e.getMessage == "easy-file:35 <visibleTo> not found" =>
