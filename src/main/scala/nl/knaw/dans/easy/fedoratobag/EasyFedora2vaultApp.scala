@@ -29,6 +29,7 @@ import javax.naming.ldap.InitialLdapContext
 import nl.knaw.dans.bag.ChecksumAlgorithm
 import nl.knaw.dans.bag.v0.DansV0Bag
 import nl.knaw.dans.easy.fedoratobag.Command.FeedBackMessage
+import nl.knaw.dans.easy.fedoratobag.FileFilterType.FileFilterType
 import nl.knaw.dans.easy.fedoratobag.FileItem.{ checkNotImplemented, filesXml }
 import nl.knaw.dans.easy.fedoratobag.FoXml.{ getEmd, _ }
 import nl.knaw.dans.easy.fedoratobag.TransformationType._
@@ -51,22 +52,22 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
   private lazy val ldap = new Ldap(ldapContext)
   private val emdUnmarshaller = new EmdUnmarshaller(classOf[EasyMetadataImpl])
 
-  def createAips(input: Iterator[DatasetId], outputDir: File, strict: Boolean, filter: Filter)
+  def createAips(input: Iterator[DatasetId], outputDir: File, strict: Boolean, europeana: Boolean, filter: Filter)
                 (printer: CSVPrinter): Try[FeedBackMessage] = input.map { datasetId =>
     val bagDir = outputDir / UUID.randomUUID.toString
-    val triedCsvRecord = createBag(datasetId, bagDir, strict, filter)
+    val triedCsvRecord = createBag(datasetId, bagDir, strict, europeana, filter)
     errorHandling(triedCsvRecord, printer, datasetId, bagDir)
   }.failFastOr(Success("no fedora/IO errors"))
 
-  def createSips(input: Iterator[DatasetId], outputDir: File, strict: Boolean, filter: Filter)
+  def createSips(input: Iterator[DatasetId], outputDir: File, strict: Boolean, europeana: Boolean, filter: Filter)
                 (printer: CSVPrinter): Try[FeedBackMessage] = input.map { datasetId =>
     val sipUUID = UUID.randomUUID.toString
     val bagUUID = UUID.randomUUID.toString
-    val depositDir = (configuration.stagingDir / sipUUID)
+    val depositDir = configuration.stagingDir / sipUUID
     // exceptions after createAip are fatal for the batch,
     // hence not reported in comment field of csvRecord
     val triedCsvRecord = for {
-      csvRecord <- createBag(datasetId, depositDir / bagUUID, strict, filter)
+      csvRecord <- createBag(datasetId, depositDir / bagUUID, strict, europeana, filter)
       _ = depositDir.moveTo(outputDir / sipUUID)(CopyOptions.atomically)
     } yield csvRecord
     errorHandling(triedCsvRecord, printer, datasetId, depositDir)
@@ -87,7 +88,7 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
       }.doIfSuccess(_.print(printer))
   }
 
-  protected[EasyFedoraToBagApp] def createBag(datasetId: DatasetId, bagDir: File, strict: Boolean, filter: Filter): Try[CsvRecord] = {
+  protected[EasyFedoraToBagApp] def createBag(datasetId: DatasetId, bagDir: File, strict: Boolean, europeana: Boolean, filter: Filter): Try[CsvRecord] = {
 
     def managedMetadataStream(foXml: Elem, streamId: String, bag: DansV0Bag, metadataFile: String) = {
       managedStreamLabel(foXml, streamId)
@@ -135,8 +136,8 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
         .getOrElse(Success(()))
       _ <- managedMetadataStream(foXml, "DATASET_LICENSE", bag, "depositor-info/depositor-agreement")
         .getOrElse(Success(()))
-      fileItems <- fedoraIDs.filter(_.startsWith("easy-file:"))
-        .toList.traverse(addPayloadFileTo(bag))
+      fileFilterType = getFileFilterType(europeana, emdXml)
+      fileItems <- addPayloads(bag, fileFilterType, fedoraIDs.filter(_.startsWith("easy-file:")))
       _ <- checkNotImplemented(fileItems, logger)
       _ <- addXmlMetadataTo(bag, "files.xml")(filesXml(fileItems))
       _ <- bag.save()
@@ -149,6 +150,19 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
       transformationType = maybeFilterViolations.map(_ => "not strict simple").getOrElse(SIMPLE.toString),
       maybeFilterViolations.getOrElse("OK"),
     )
+  }
+
+  private def isDCMI(node: Node) = node
+    .attribute("http://easy.dans.knaw.nl/easy/easymetadata/eas/", "scheme")
+    .exists(_.text == "DCMI")
+
+  private def getFileFilterType(europeana: Boolean, emd: Node): FileFilterType = {
+    if (!europeana) FileFilterType.ALL
+    else {
+      val dcmiType = (emd \ "type" \ "type").filter(isDCMI)
+      if (dcmiType.text.toLowerCase.trim == "text") FileFilterType.PDF
+      else FileFilterType.IMAGE
+    }
   }
 
   private def getAudience(id: String) = {
@@ -169,6 +183,13 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
     bag.addTagFile(content.serialize.inputStream, Paths.get(s"metadata/depositor-info/agreements.xml"))
   }
 
+  private def addPayloads(bag: DansV0Bag, fileFilterType: FileFilterType, fileIds: Seq[String]) = {
+    fileFilterType match {
+      case FileFilterType.ALL => fileIds.toList.traverse(addPayloadFileTo(bag))
+      case _ => ???
+    }
+  }
+
   private def addPayloadFileTo(bag: DansV0Bag)(fedoraFileId: String): Try[Node] = {
     val streamId = "EASY_FILE"
     for {
@@ -176,6 +197,7 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
       path = Paths.get((foXml \\ "file-item-md" \\ "path").text)
       _ = logger.info(s"Adding $fedoraFileId to $path")
       fileItem <- FileItem(foXml)
+      // TODO split method to find largest pdf/image
       _ <- fedoraProvider
         .disseminateDatastream(fedoraFileId, streamId)
         .map(bag.addPayloadFile(_, path))
