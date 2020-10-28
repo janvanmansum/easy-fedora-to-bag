@@ -97,7 +97,8 @@ class AppSpec extends TestSupportFixture with BagIndexSupport with MockFactory w
     val ids = Iterator("success:1", "success:2")
     val outputDir = (testDir / "output").createDirectories()
     val sw = new StringWriter()
-    val app = new OverriddenApp()
+    val stagingDir = testDir / "staging"
+    val app = new OverriddenApp(Configuration(null, null, null, null, stagingDir, null))
     app.createAips(ids, outputDir, strict = true, europeana = false, app.filter)(CsvRecord.csvFormat.print(sw)) shouldBe Success("no fedora/IO errors")
     sw.toString should (fullyMatch regex
       """easyDatasetId,uuid,doi,depositor,transformationType,comment
@@ -112,7 +113,8 @@ class AppSpec extends TestSupportFixture with BagIndexSupport with MockFactory w
     val ids = Iterator("success:1", "failure:2", "notSimple:3", "success:4", "fatal:5", "success:6")
     val outputDir = (testDir / "output").createDirectories()
     val sw = new StringWriter()
-    val app = new OverriddenApp()
+    val stagingDir = testDir / "staging"
+    val app = new OverriddenApp(Configuration(null, null, null, null, stagingDir, null))
     app.createAips(ids, outputDir, strict = true, europeana = false, app.filter)(CsvRecord.csvFormat.print(sw)) should matchPattern {
       case Failure(t) if t.getMessage == "mocked exception" =>
     }
@@ -124,7 +126,8 @@ class AppSpec extends TestSupportFixture with BagIndexSupport with MockFactory w
         |success:4,.*,testDOI,testUser,simple,OK
         |""".stripMargin
       )
-    outputDir.list.toSeq should have length 4
+    outputDir.list.toSeq should have length 2
+    stagingDir.list.toSeq should have length 2
   }
 
   "createBag" should "process DepositApi" in {

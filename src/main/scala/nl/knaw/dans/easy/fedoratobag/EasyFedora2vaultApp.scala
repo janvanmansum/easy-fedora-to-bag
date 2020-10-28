@@ -62,15 +62,20 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
   def createExport(input: Iterator[DatasetId], outputDir: File, strict: Boolean, europeana: Boolean, filter: Filter, outputFormat: OutputFormat)
                 (printer: CSVPrinter): Try[FeedBackMessage] = input.map { datasetId =>
     val bagUuid = UUID.randomUUID.toString
-    val bagDir = configuration.stagingDir / bagUuid
+    val sipUuid = UUID.randomUUID.toString
+    val sipDir = configuration.stagingDir / sipUuid
+    val bagDir = outputFormat match {
+      case OutputFormat.AIP => configuration.stagingDir / bagUuid
+      case OutputFormat.SIP => sipDir / bagUuid
+    }
     val triedCsvRecord = for {
       csvRecord <- createBag(datasetId, bagDir, strict, europeana, filter)
       _ = debug(s"Result from createBag: $csvRecord")
       _ <- Try {
         debug("Moving bag to output dir...")
         outputFormat match {
-          case OutputFormat.AIP => bagDir.moveTo(outputDir)(CopyOptions.atomically)
-          case OutputFormat.SIP => bagDir.moveTo(outputDir / UUID.randomUUID().toString)(CopyOptions.atomically)
+          case OutputFormat.AIP => bagDir.moveTo(outputDir / bagUuid)(CopyOptions.atomically)
+          case OutputFormat.SIP => sipDir.moveTo(outputDir / sipUuid)(CopyOptions.atomically)
         }
       }
     } yield csvRecord
