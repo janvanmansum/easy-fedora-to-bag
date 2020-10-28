@@ -131,12 +131,13 @@ class AppSpec extends TestSupportFixture with BagIndexSupport with MockFactory w
     val app = new MockedApp()
     implicit val fedoraProvider: FedoraProvider = app.fedoraProvider
     expectedAudiences(Map("easy-discipline:77" -> "D13200"))
-    expectedSubordinates(app.fedoraProvider)
-    expectedFoXmls(app.fedoraProvider, sampleFoXML / "DepositApi.xml")
+    expectedFoXmls(app.fedoraProvider, sampleFoXML / "DepositApi.xml",  sampleFoXML / "easy-file-35.xml")
     expectedManagedStreams(app.fedoraProvider,
       (testDir / "additional-license").write("lalala"),
       (testDir / "dataset-license").write("blablabla"),
+      mockContentOfFile35,
     )
+    expectedSubordinates(app.fedoraProvider, "easy-file:35")
 
     val uuid = UUID.randomUUID
     app.createBag("easy-dataset:17", testDir / "bags" / uuid.toString, strict = true, europeana = false, app.filter) shouldBe
@@ -164,13 +165,13 @@ class AppSpec extends TestSupportFixture with BagIndexSupport with MockFactory w
 
     val uuid = UUID.randomUUID
     app.createBag("easy-dataset:17", testDir / "bags" / uuid.toString, strict = false, europeana = false, app.filter) shouldBe
-      Success(CsvRecord("easy-dataset:17", uuid, "10.17026/test-Iiib-z9p-4ywa", "user001", "not strict simple", "Violates 2: has jump off"))
+      Failure(NoPayloadFilesException())
 
     val metadata = (testDir / "bags").children.next() / "metadata"
     (metadata / "depositor-info/depositor-agreement.pdf").contentAsString shouldBe "blablabla"
     (metadata / "license.pdf").contentAsString shouldBe "lalala"
     metadata.list.toSeq.map(_.name).sortBy(identity) shouldBe
-      Seq("amd.xml", "dataset.xml", "depositor-info", "emd.xml", "files.xml", "license.pdf", "original")
+      Seq("amd.xml", "dataset.xml", "depositor-info", "emd.xml", "license.pdf", "original")
     (metadata / "depositor-info").list.toSeq.map(_.name).sortBy(identity) shouldBe
       Seq("agreements.xml", "depositor-agreement.pdf", "message-from-depositor.txt")
   }

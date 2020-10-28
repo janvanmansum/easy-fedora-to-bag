@@ -32,6 +32,7 @@ import nl.knaw.dans.easy.fedoratobag.Command.FeedBackMessage
 import nl.knaw.dans.easy.fedoratobag.FileFilterType.FileFilterType
 import nl.knaw.dans.easy.fedoratobag.FileItem.{ checkNotImplemented, filesXml }
 import nl.knaw.dans.easy.fedoratobag.FoXml.{ getEmd, _ }
+import nl.knaw.dans.easy.fedoratobag.OutputFormat.OutputFormat
 import nl.knaw.dans.easy.fedoratobag.TransformationType._
 import nl.knaw.dans.easy.fedoratobag.filter._
 import nl.knaw.dans.lib.error._
@@ -53,24 +54,27 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
   private val emdUnmarshaller = new EmdUnmarshaller(classOf[EasyMetadataImpl])
 
   def createAips(input: Iterator[DatasetId], outputDir: File, strict: Boolean, europeana: Boolean, filter: Filter)
-                (printer: CSVPrinter): Try[FeedBackMessage] = input.map { datasetId =>
-    val bagDir = outputDir / UUID.randomUUID.toString
-    val triedCsvRecord = createBag(datasetId, bagDir, strict, europeana, filter)
-    errorHandling(triedCsvRecord, printer, datasetId, bagDir)
-  }.failFastOr(Success("no fedora/IO errors"))
+                (printer: CSVPrinter): Try[FeedBackMessage] = createExport(input, outputDir, strict, europeana, filter, OutputFormat.AIP)(printer)
 
   def createSips(input: Iterator[DatasetId], outputDir: File, strict: Boolean, europeana: Boolean, filter: Filter)
+                (printer: CSVPrinter): Try[FeedBackMessage] = createExport(input, outputDir, strict, europeana, filter, OutputFormat.SIP)(printer)
+
+  def createExport(input: Iterator[DatasetId], outputDir: File, strict: Boolean, europeana: Boolean, filter: Filter, outputFormat: OutputFormat)
                 (printer: CSVPrinter): Try[FeedBackMessage] = input.map { datasetId =>
-    val sipUUID = UUID.randomUUID.toString
-    val bagUUID = UUID.randomUUID.toString
-    val depositDir = configuration.stagingDir / sipUUID
-    // exceptions after createAip are fatal for the batch,
-    // hence not reported in comment field of csvRecord
+    val bagUuid = UUID.randomUUID.toString
+    val bagDir = configuration.stagingDir / bagUuid
     val triedCsvRecord = for {
-      csvRecord <- createBag(datasetId, depositDir / bagUUID, strict, europeana, filter)
-      _ = depositDir.moveTo(outputDir / sipUUID)(CopyOptions.atomically)
+      csvRecord <- createBag(datasetId, bagDir, strict, europeana, filter)
+      _ = debug(s"Result from createBag: $csvRecord")
+      _ <- Try {
+        debug("Moving bag to output dir...")
+        outputFormat match {
+          case OutputFormat.AIP => bagDir.moveTo(outputDir)(CopyOptions.atomically)
+          case OutputFormat.SIP => bagDir.moveTo(outputDir / UUID.randomUUID().toString)(CopyOptions.atomically)
+        }
+      }
     } yield csvRecord
-    errorHandling(triedCsvRecord, printer, datasetId, depositDir)
+    errorHandling(triedCsvRecord, printer, datasetId, bagDir)
   }.failFastOr(Success("no fedora/IO errors"))
 
   private def errorHandling(triedCsvRecord: Try[CsvRecord], printer: CSVPrinter, datasetId: DatasetId, ipDir: File) = {
@@ -81,7 +85,7 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
       }
       .recoverWith {
         case t: FedoraClientException if t.getStatus != 404 => Failure(t)
-        case t: Exception if t.isInstanceOf[IOException] => Failure(t)
+        case t: IOException => Failure(t)
         case t => Success(CsvRecord(
           datasetId, UUID.fromString(ipDir.name), doi = "", depositor = "", SIMPLE.toString, s"FAILED: $t"
         ))
@@ -184,32 +188,58 @@ class EasyFedoraToBagApp(configuration: Configuration) extends DebugEnhancedLogg
   }
 
   private def addPayloads(bag: DansV0Bag, fileFilterType: FileFilterType, fileIds: Seq[String]) = {
-    fileFilterType match {
-      case FileFilterType.ALL => fileIds.toList.traverse(addPayloadFileTo(bag))
-      case _ => ???
-    }
+    fileIds.toList.traverse(getFileInfo)
+      .flatMap {
+        fileInfos =>
+          val selected = fileFilterType match {
+            case FileFilterType.ALL => fileInfos
+            case t @ _ => selectFileByType(t, fileInfos)
+          }
+          if (selected.nonEmpty) selected.traverse(addPayloadFileTo(bag))
+          else Failure(NoPayloadFilesException())
+      }
   }
 
-  private def addPayloadFileTo(bag: DansV0Bag)(fedoraFileId: String): Try[Node] = {
-    val streamId = "EASY_FILE"
+  private def selectFileByType(fileFilterType: FileFilterType, fileInfos: List[FileInfo]): List[FileInfo] = {
+    val selected = fileInfos.filter(_.mimeType.startsWith(
+      fileFilterType match {
+        case FileFilterType.PDF => "application/pdf"
+        case FileFilterType.IMAGE => "image/"
+      }))
+    val reversedSelection = fileInfos.filter(_.mimeType.startsWith(
+      fileFilterType match {
+        case FileFilterType.PDF => "image/" // Sic!
+        case FileFilterType.IMAGE => "application/pdf" // Sic!
+      }))
+    if (selected.nonEmpty) List(selected.maxBy(_.size))
+    else if (reversedSelection.nonEmpty) List(reversedSelection.maxBy(_.size))
+         else if (fileInfos.nonEmpty) List(fileInfos.maxBy(_.size))
+              else List.empty[FileInfo]
+  }
+
+  private def getFileInfo(fedoraFileId: String): Try[FileInfo] = {
     for {
       foXml <- fedoraProvider.loadFoXml(fedoraFileId)
-      path = Paths.get((foXml \\ "file-item-md" \\ "path").text)
-      sizeString = (foXml \\ "file-item-md" \\ "size").text
-      _ = logger.info(s"Adding $fedoraFileId (size=$sizeString) to $path")
-      // TODO split method to find largest pdf/image
-      fileItem <- FileItem(foXml)
+      path <- Try { Paths.get((foXml \\ "file-item-md" \\ "path").text) }
+      sizeString <- Try { (foXml \\ "file-item-md" \\ "size").text }
+      mimeType <- Try { (foXml \\ "file-item-md" \\ "mimeType").text }
+      optContentDigest <- Try { FoXml.getStreamRoot("EASY_FILE", foXml).map((_ \\ "contentDigest")).flatMap(_.headOption) }
+    } yield FileInfo(fedoraFileId, path, sizeString.toLong, mimeType, optContentDigest, foXml)
+  }
+
+  private def addPayloadFileTo(bag: DansV0Bag)(fileInfo: FileInfo): Try[Node] = {
+    val streamId = "EASY_FILE"
+    for {
+      fileItem <- FileItem(fileInfo.foXml)
       _ <- fedoraProvider
-        .disseminateDatastream(fedoraFileId, streamId)
-        .map(bag.addPayloadFile(_, path))
+        .disseminateDatastream(fileInfo.fedoraFileId, streamId)
+        .map(bag.addPayloadFile(_, fileInfo.path))
         .tried.flatten
       _ <- bag.save()
-      fileStream = getStreamRoot(streamId, foXml)
-      maybeDigest = fileStream.flatMap(n => (n \\ "contentDigest").theSeq.headOption)
-      _ <- maybeDigest.map(validateChecksum(bag.baseDir / s"data/$path", bag, fedoraFileId))
-        .getOrElse(Success(logger.warn(s"No digest found for $fedoraFileId ${ fileStream.map(_.toOneLiner).getOrElse("") }")))
+      _ = fileInfo.contentDigest.map(validateChecksum(bag.baseDir / s"data/${ fileInfo.path }", bag, fileInfo.fedoraFileId))
+        .getOrElse(Success(logger.warn(s"No digest found for ${ fileInfo.fedoraFileId } path = ${ fileInfo.path }")))
     } yield fileItem
-  }.recoverWith { case e => Failure(new Exception(s"$fedoraFileId ${ e.getMessage }", e)) }
+  }.recoverWith { case e => Failure(new Exception(s"${ fileInfo.fedoraFileId } ${ e.getMessage }", e)) }
 
   private def validateChecksum(file: File, bag: DansV0Bag, fedoraFileId: String)(maybeDigest: Node) = Try {
     val algorithms = Map(
